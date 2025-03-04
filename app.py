@@ -6,66 +6,67 @@ import numpy as np
 import tempfile
 import os
 
-# Define o caminho do Tesseract
+# Configurações do Tesseract (automáticas no Streamlit Cloud)
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/"
 
-# Agora pode rodar o OCR normalmente
-text = pytesseract.image_to_string(image, lang="por")
-
-# Define a função para pré-processar a imagem
 def preprocess_image(image):
-    # Converte para escala de cinza
+    """Pré-processamento da imagem para melhorar o OCR"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # Aplica binarização adaptativa
-    processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                      cv2.THRESH_BINARY, 31, 2)
-    # Retorna a imagem processada
+    processed = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 31, 2
+    )
     return processed
 
-# Define a função para extrair texto do PDF usando OCR
 def extract_text_from_pdf(pdf_path):
+    """Extrai texto de um PDF usando OCR com tratamento de erros"""
     try:
-        # Converte o PDF em imagens
         images = convert_from_path(pdf_path, dpi=300)
-        extracted_text = ""
+        extracted_text = []
         
         for img in images:
-            # Converte imagem do PIL para OpenCV
+            # Conversão para formato OpenCV
             open_cv_image = np.array(img)
             open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
             
-            # Pré-processa a imagem
+            # Pré-processamento
             processed_image = preprocess_image(open_cv_image)
             
-            # Aplica OCR com otimização de segmentação
-            custom_config = r'--oem 3 --psm 6'  # Melhor configuração para texto estruturado
-            text = pytesseract.image_to_string(processed_image, config=custom_config, lang='por')
-            
-            extracted_text += text + "\n"
+            # Configuração do Tesseract
+            custom_config = r'--oem 3 --psm 6'
+            text = pytesseract.image_to_string(
+                processed_image,
+                config=custom_config,
+                lang='por'
+            )
+            extracted_text.append(text.strip())
         
-        if extracted_text.strip():
-            return extracted_text
-        else:
-            return "OCR não conseguiu extrair texto."
+        full_text = "\n\n".join(extracted_text)
+        return full_text if full_text else "Nenhum texto detectado."
     
     except Exception as e:
-        return f"Erro no OCR: {str(e)}"
+        return f"Erro durante o processamento: {str(e)}"
 
-# Interface do Streamlit
-st.title("Extração de Texto de PDFs (OCR Aprimorado)")
-
-uploaded_file = st.file_uploader("Envie um arquivo PDF", type="pdf")
-
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-        temp_pdf.write(uploaded_file.read())
-        temp_pdf_path = temp_pdf.name
-
-    st.text("Processando o arquivo...")
-    extracted_text = extract_text_from_pdf(temp_pdf_path)
+# Interface Streamlit
+def main():
+    st.title("📄 Extrator de Texto de PDF (OCR)")
+    st.markdown("**Envie um PDF para extrair o texto usando reconhecimento óptico de caracteres**")
     
-    # Exibe o texto extraído
-    st.text_area("Texto Extraído", extracted_text, height=300)
+    uploaded_file = st.file_uploader("Selecione um arquivo PDF", type="pdf")
+    
+    if uploaded_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf.write(uploaded_file.read())
+            temp_path = temp_pdf.name
+        
+        with st.spinner("Processando PDF..."):
+            result = extract_text_from_pdf(temp_path)
+        
+        st.subheader("Texto Extraído")
+        st.text_area("Resultado", result, height=400)
+        
+        os.remove(temp_path)
 
-    # Remove o arquivo temporário
-    os.remove(temp_pdf_path)
+if __name__ == "__main__":
+    main()
