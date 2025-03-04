@@ -5,8 +5,6 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import os
-import pytesseract
 
 # Define o caminho do Tesseract
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/"
