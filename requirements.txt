@@ -1,4 +1,3 @@
-requests  
 streamlit
 pytesseract
 pdf2image
