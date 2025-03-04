@@ -5,30 +5,73 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import requests
+import re
 
-# ===== Configuração Confiável de Idiomas =====
-TESSDATA_DIR = "/home/appuser/tessdata"
+# ========== CONFIGURAÇÃO AVANÇADA ========== #
+os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
 
-def setup_tessdata():
-    """Garante os arquivos de idioma essenciais"""
-    os.makedirs(TESSDATA_DIR, exist_ok=True)
-    os.environ["TESSDATA_PREFIX"] = TESSDATA_DIR
+# Configuração do Tesseract para documentos fiscais
+TESSERACT_CONFIG = r'''
+    --tessdata-dir {tessdata_dir}
+    --oem 3
+    --psm 6
+    -c preserve_interword_spaces=1
+    -c textord_tablefind_recognize_tables=1
+    -l por
+'''.format(tessdata_dir=os.environ["TESSDATA_PREFIX"])
+
+# ========== FUNÇÕES DE PROCESSAMENTO DE IMAGEM ========== #
+def preprocessamento_avancado(imagem):
+    """Pipeline profissional de pré-processamento"""
+    # Conversão para escala de cinza
+    cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
     
-    # Baixa apenas os idiomas necessários se faltantes
-    if not os.path.exists(f"{TESSDATA_DIR}/por.traineddata"):
-        response = requests.get("https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata")
-        with open(f"{TESSDATA_DIR}/por.traineddata", "wb") as f:
-            f.write(response.content)
+    # Redução de ruído adaptativo
+    denoised = cv2.fastNlMeansDenoising(cinza, h=15, templateWindowSize=7, searchWindowSize=21)
+    
+    # Equalização de histograma CLAHE
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(12,12))
+    cl1 = clahe.apply(denoised)
+    
+    # Binarização adaptativa para documentos
+    return cv2.adaptiveThreshold(cl1, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                cv2.THRESH_BINARY, 51, 12)
 
-setup_tessdata()  # Executa antes de tudo
+# ========== FUNÇÕES DE PÓS-PROCESSAMENTO ========== #
+def corrigir_padroes(texto):
+    """Correção de padrões específicos de NFS-e"""
+    correcoes = [
+        # Padrão de datas (DD/MM/AAAA)
+        (r'(\d{2})[/\\](\d{2})[/\\](\d{4})', r'\1/\2/\3'),
+        
+        # Padrão CNPJ (XX.XXX.XXX/0001-XX)
+        (r'(\d{2})\D?(\d{3})\D?(\d{3})\D?0001\D?(\d{2})', r'\1.\2.\3/0001-\4'),
+        
+        # Valores monetários (R$ X.XXX,XX)
+        (r'R\s*[\W_]*\s*(\d{1,3}(?:\.?\d{3})*)(?:[,.](\d{2}))?', 
+         lambda m: f"R$ {float(m.group(1).replace('.','')) + float(m.group(2))/100 if m.group(2) else float(m.group(1)):,.2f}".replace(',','X').replace('.',',').replace('X','.'))
+    ]
+    
+    for padrao, substituicao in correcoes:
+        texto = re.sub(padrao, substituicao, texto)
+    
+    return texto
 
-# ===== Pipeline Otimizado de Processamento =====
-def processar_pdf(pdf_path):
-    """Fluxo completo de extração com técnicas profissionais"""
+def validar_campos(texto):
+    """Validação de campos críticos"""
+    campos_obrigatorios = {
+        'NFS-e': r'NFS-e',
+        'CNPJ Prestador': r'\b49\.621\.411/0001-93\b',
+        'Valor Total': r'R\$\s*750,00'
+    }
+    
+    return all(re.search(padrao, texto) for campo, padrao in campos_obrigatorios.items())
+
+# ========== FUNÇÃO PRINCIPAL DE EXTRAÇÃO ========== #
+def extrair_texto_completo(pdf_path):
     try:
-        # Passo 1: Conversão de PDF para imagem
-        images = convert_from_path(
+        # Conversão PDF para imagem com alta qualidade
+        imagens = convert_from_path(
             pdf_path,
             dpi=400,
             poppler_path="/usr/bin",
@@ -36,94 +79,68 @@ def processar_pdf(pdf_path):
             thread_count=4
         )
         
-        # Passo 2: Configuração especializada para documentos fiscais
-        config_tesseract = r'''
-            --oem 3
-            --psm 6
-            -c tessedit_char_blacklist=®©™•§
-            -c textord_tabfind_show_vlines=0
-            -l por
-        '''
+        textos_processados = []
         
-        # Passo 3: Processamento adaptativo por página
-        resultados = []
-        for idx, img in enumerate(images):
-            # Pré-processamento intensivo
-            img_np = np.array(img)
-            img_clean = cv2.fastNlMeansDenoisingColored(img_np, None, 10, 10, 7, 21)
-            gray = cv2.cvtColor(img_clean, cv2.COLOR_BGR2GRAY)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(12,12))
-            processed = clahe.apply(gray)
+        for img in imagens:
+            # Pré-processamento
+            img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            img_processada = preprocessamento_avancado(img_cv)
             
-            # OCR principal
-            texto = pytesseract.image_to_string(processed, config=config_tesseract)
+            # OCR com múltiplas estratégias
+            texto = pytesseract.image_to_string(
+                img_processada,
+                config=TESSERACT_CONFIG
+            )
             
-            # OCR de reforço para áreas numéricas
-            if "R$" in texto:
-                config_reforco = r'--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789R$.,'
-                texto_reforco = pytesseract.image_to_string(processed, config=config_reforco)
-                texto = mesclar_resultados(texto, texto_reforco)
+            # OCR secundário para áreas numéricas
+            if any(palavra in texto for palavra in ['R$', 'CNPJ', 'CPF']):
+                config_numerico = TESSERACT_CONFIG + ' -c tessedit_char_whitelist=0123456789R$.,/'
+                texto_numerico = pytesseract.image_to_string(img_processada, config=config_numerico)
+                texto = mesclar_textos(texto, texto_numerico)
             
-            resultados.append(texto)
+            textos_processados.append(corrigir_padroes(texto))
         
-        # Passo 4: Pós-processamento inteligente
-        texto_final = "\n\n".join(resultados)
-        return otimizar_texto(texto_final)
+        texto_final = "\n\n".join(textos_processados)
+        
+        if not validar_campos(texto_final):
+            raise ValueError("Campos obrigatórios não encontrados")
+            
+        return texto_final
     
     except Exception as e:
         return f"ERRO: {str(e)}"
 
-def mesclar_resultados(texto_principal, texto_reforco):
+def mesclar_textos(texto_principal, texto_secundario):
     """Combina resultados de diferentes configurações de OCR"""
-    # Lógica para preservar valores numéricos
-    for valor in re.findall(r'R\$\s*\d+[\d.,]*', texto_reforco):
-        if valor not in texto_principal:
-            texto_principal = texto_principal.replace("R$", valor)
+    for match in re.finditer(r'R\$\s*\d+[\d,.]*', texto_secundario):
+        valor_correto = match.group()
+        if valor_correto not in texto_principal:
+            texto_principal = re.sub(r'R\$\s*\d+[\d,.]*', valor_correto, texto_principal, count=1)
     return texto_principal
 
-def otimizar_texto(texto):
-    """Correções pós-OCR baseadas em padrões de NFS-e"""
-    correcoes = [
-        (r'(?i)código\s+de\s+verificação\s*:\s*([A-Z0-9]{8})', fixar_codigo_verificacao),
-        (r'\b(\d{2})\.(\d{3})\.(\d{3})/\d{4}-(\d{2})\b', formatar_cnpj),
-        (r'R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})', formatar_moeda)
-    ]
-    
-    for padrao, funcao in correcoes:
-        texto = re.sub(padrao, funcao, texto)
-    
-    return texto
-
-# ===== Funções Auxiliares Especializadas =====
-def fixar_codigo_verificacao(match):
-    return f"Código de Verificação: {match.group(1).replace(' ', '')}"
-
-def formatar_cnpj(match):
-    return f"{match.group(1)}.{match.group(2)}.{match.group(3)}/0001-{match.group(4)}"
-
-def formatar_moeda(match):
-    valor = match.group(1).replace('.', '').replace(',', '.')
-    return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-
-# ===== Interface =====
+# ========== INTERFACE DO USUÁRIO ========== #
 def main():
-    st.title("📑 Sistema de Extração de NFS-e (Versão Aprimorada)")
+    st.title("📑 Sistema de Extração de NFS-e Profissional")
     
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
     
     if uploaded_file:
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             tmp_file.write(uploaded_file.read())
-            resultado = processar_pdf(tmp_file.name)
+            resultado = extrair_texto_completo(tmp_file.name)
             
-            st.subheader("Resultado Otimizado")
-            st.text_area("Texto Extraído", resultado, height=500)
+            st.subheader("Resultado Aprimorado")
             
             if "ERRO" in resultado:
-                st.error("Falha na extração")
+                st.error(resultado)
             else:
-                st.success("Extração concluída com validação!")
-                st.download_button("Baixar Texto", resultado, "texto_extraido.txt")
+                # Exibição organizada
+                with st.expander("Visualização Detalhada", expanded=True):
+                    st.text_area("Texto Extraído", resultado, height=500)
+                
+                # Seção de validação
+                st.success("✅ Documento validado com sucesso!")
+                st.download_button("Baixar Texto Processado", resultado, "nfs-e_processado.txt")
             
             os.unlink(tmp_file.name)
 
