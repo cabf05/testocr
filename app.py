@@ -5,22 +5,16 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import subprocess
 
-# ========== CONFIGURAÇÃO DO AMBIENTE ========== #
-def setup_environment():
-    # Verifica e instala o Tesseract Português se necessário
-    if not os.path.exists("/usr/share/tesseract-ocr/tessdata/por.traineddata"):
-        subprocess.run([
-            "apt-get", "update", 
-            "&&", "apt-get", "install", "-y", "tesseract-ocr-por"
-        ], shell=True)
-    
-    # Configura variáveis de ambiente críticas
-    os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/tessdata/"
+# ========== CONFIGURAÇÃO CRÍTICA ========== #
+# Caminho oficial do Tesseract no Streamlit Cloud
+os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
 
-# Executa a configuração antes de tudo
-setup_environment()
+# Verificação explícita do caminho (para debug)
+try:
+    print("Conteúdo do diretório TESSDATA:", os.listdir(os.environ["TESSDATA_PREFIX"]))
+except Exception as e:
+    print(f"Erro na verificação do caminho: {str(e)}")
 
 # ========== FUNÇÕES DE PROCESSAMENTO ========== #
 def preprocess_image(image):
@@ -30,18 +24,18 @@ def preprocess_image(image):
 
 def extract_text_from_pdf(pdf_path):
     try:
-        images = convert_from_path(pdf_path, dpi=300)
+        images = convert_from_path(pdf_path, dpi=300, poppler_path="/usr/bin")
         full_text = []
         
         for img in images:
             cv_image = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
             processed = preprocess_image(cv_image)
             
-            # Configuração reforçada do Tesseract
+            # Configuração reforçada com caminho absoluto
             text = pytesseract.image_to_string(
                 processed,
                 lang='por',
-                config='--tessdata-dir /usr/share/tesseract-ocr/tessdata --oem 3 --psm 6'
+                config=f'--tessdata-dir {os.environ["TESSDATA_PREFIX"]} --oem 3 --psm 6'
             )
             full_text.append(text.strip())
         
@@ -52,7 +46,7 @@ def extract_text_from_pdf(pdf_path):
 
 # ========== INTERFACE ========== #
 def main():
-    st.title("📄 Conversor PDF-Texto Definitivo")
+    st.title("📄 Conversor PDF-Texto (Solução Definitiva)")
     
     uploaded_file = st.file_uploader("Carregue seu PDF", type="pdf")
     
