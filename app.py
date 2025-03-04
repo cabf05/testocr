@@ -5,6 +5,14 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import os
+import pytesseract
+
+# Define o caminho do Tesseract
+os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/"
+
+# Agora pode rodar o OCR normalmente
+text = pytesseract.image_to_string(image, lang="por")
 
 # Define a função para pré-processar a imagem
 def preprocess_image(image):
