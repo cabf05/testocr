@@ -5,6 +5,20 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import requests
+
+   def download_tessdata():
+       tessdata_dir = "./tessdata"
+       os.makedirs(tessdata_dir, exist_ok=True)
+       
+       url = "https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata"
+       response = requests.get(url)
+       
+       with open(f"{tessdata_dir}/por.traineddata", "wb") as f:
+           f.write(response.content)
+
+   # Executa antes de tudo
+   download_tessdata()
 
 # Configuração crucial para o Streamlit Cloud
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/tessdata/"
