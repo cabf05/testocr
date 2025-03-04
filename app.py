@@ -5,70 +5,65 @@ import cv2
 import numpy as np
 import tempfile
 import os
-import requests
 
-def download_tessdata():
-   tessdata_dir = "./tessdata"
-   os.makedirs(tessdata_dir, exist_ok=True)
-   url = "https://github.com/tesseract-ocr/tessdata/raw/main/por.traineddata"
-   response = requests.get(url)
-   with open(f"{tessdata_dir}/por.traineddata", "wb") as f:
-      f.write(response.content)
-
-# Executa antes de tudo
-download_tessdata()
-
-# Configuração crucial para o Streamlit Cloud
+# Configuração crucial para o Tesseract no Streamlit Cloud
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/tessdata/"
 
 def preprocess_image(image):
+    """Melhora a qualidade da imagem para OCR"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    processed = cv2.adaptiveThreshold(
+    return cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY, 31, 2
     )
-    return processed
 
 def extract_text_from_pdf(pdf_path):
+    """Processa o PDF e extrai texto com OCR"""
     try:
         images = convert_from_path(pdf_path, dpi=300)
-        extracted_text = []
+        full_text = []
         
         for img in images:
-            open_cv_image = np.array(img)
-            open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
-            processed_image = preprocess_image(open_cv_image)
+            # Converte para formato OpenCV
+            cv_image = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            processed = preprocess_image(cv_image)
             
-            custom_config = r'--oem 3 --psm 6'
+            # Configuração otimizada para documentos
             text = pytesseract.image_to_string(
-                processed_image,
-                config=custom_config,
-                lang='por'
+                processed,
+                lang='por',
+                config='--oem 3 --psm 6'
             )
-            extracted_text.append(text.strip())
+            full_text.append(text.strip())
         
-        full_text = "\n\n".join(extracted_text)
-        return full_text if full_text else "Nenhum texto detectado."
+        return "\n\n".join(full_text) if any(full_text) else "Nenhum texto detectado."
     
     except Exception as e:
-        return f"Erro durante o processamento: {str(e)}"
+        return f"Erro: {str(e)}"
 
 def main():
-    st.title("📄 Extrator de Texto de PDF (OCR)")
-    uploaded_file = st.file_uploader("Selecione um PDF", type="pdf")
+    st.title("📑 Conversor PDF para Texto")
+    st.markdown("### Utilizando Tesseract OCR com suporte a português")
+    
+    uploaded_file = st.file_uploader(
+        "Carregue seu arquivo PDF", 
+        type="pdf",
+        help="Tamanho máximo: 200MB"
+    )
     
     if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-            temp_pdf.write(uploaded_file.read())
-            temp_path = temp_pdf.name
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            pdf_path = tmp_file.name
         
-        with st.spinner("Processando..."):
-            result = extract_text_from_pdf(temp_path)
+        with st.spinner("Processando documento..."):
+            result = extract_text_from_pdf(pdf_path)
         
-        st.subheader("Resultado")
-        st.text_area("Texto Extraído", result, height=400)
-        os.remove(temp_path)
+        st.subheader("Resultado da Extração")
+        st.text_area("Texto Extraído", value=result, height=400)
+        
+        os.remove(pdf_path)
 
 if __name__ == "__main__":
     main()
