@@ -65,7 +65,7 @@ def corrigir_formatacao(texto):
     """Realiza correções inteligentes para padrões de NFS-e."""
     correcoes = [
         # CNPJ (tolerante a variações)
-        (r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})', r'\1.\2.\3/0001-\4'),
+        (r'(\d{2})[\.]?\s*(\d{3})[\.]?\s*(\d{3})[\/]?\s*0001[-]?\s*(\d{2})', r'\1.\2.\3/0001-\4'),
         # Datas (DD/MM/AAAA com separadores variados)
         (r'(\d{1,2})[\/\\\-_ ]+(\d{1,2})[\/\\\-_ ]+(\d{4})', r'\1/\2/\3'),
         # Valores monetários (R$ 1.234,56)
@@ -83,16 +83,16 @@ def validar_conteudo(texto):
     """Validação tolerante com logging detalhado dos campos obrigatórios."""
     campos = {
         'NFS-e': [
-            r'N\s*F\s*[-\s]*S\s*e',
-            r'NOTA\s*FISCAL\s*DE\s*SERVI[ÇC]OS'
+            r'nota\s*fiscal\s*de\s*servi[a-z]*',   # captura "nota fiscal de serviços" com erros de OCR
+            r'n\s*f\s*[-\s]*s\s*e'                  # captura "NFS-e" com variações de espaçamento ou hifens
         ],
         'CNPJ Prestador': [
-            r'40[\D]?621[\D]?411[/]?0001[\D]?53',
-            r'SUSTENTAMAIS\s+CONSULTORIA'
+            r'40\D*621\D*411\D*0001\D*53',          # permite caracteres não dígitos entre os números
+            r'sustentamais\s*consultoria'
         ],
         'Valor Total': [
-            r'R\$\s*750[,.]00',
-            r'VALOR\s*TOTAL\s*DA?\s*NOTA.*750[,.]00'
+            r'R\$\s*750[,.]00',                     # captura "R$ 750,00"
+            r'valor\s*(?:total|liquido)[^\d]*750[,.]00'  # captura variações envolvendo "valor total" ou "valor liquido"
         ]
     }
     
@@ -154,7 +154,7 @@ def processar_documento(pdf_path):
 
 # ========== INTERFACE ========== #
 def main():
-    st.title("📑 Sistema de Extração de NFS-e (Versão 2.3)")
+    st.title("📑 Sistema de Extração de NFS-e (Versão 2.4)")
     
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
     
@@ -178,4 +178,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
