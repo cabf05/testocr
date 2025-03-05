@@ -69,7 +69,7 @@ def corrigir_formatacao(texto):
         # Datas (DD/MM/AAAA com separadores variados)
         (r'(\d{1,2})[\/\\\-_ ]+(\d{1,2})[\/\\\-_ ]+(\d{4})', r'\1/\2/\3'),
         # Valores monetários (R$ 1.234,56)
-        (r'R\s*[\$\*]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?',
+        (r'R\s*[\$]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?',
          lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}"
                       .replace(',','X').replace('.',',').replace('X','.'))
     ]
@@ -80,25 +80,30 @@ def corrigir_formatacao(texto):
     return texto
 
 def validar_conteudo(texto):
-    """Validação tolerante com logging detalhado dos campos obrigatórios."""
+    """Validação tolerante dos campos obrigatórios, com regex ampliados."""
     campos = {
         'NFS-e': [
-            r'nota\s*fiscal\s*de\s*servi[a-z]*',   # captura "nota fiscal de serviços" com erros de OCR
-            r'n\s*f\s*[-\s]*s\s*e'                  # captura "NFS-e" com variações de espaçamento ou hifens
+            # Procura por variações de "NFS-e"
+            r'N\s*F\s*S\s*[-\s]*E',
+            # Procura por "nota fiscal" seguida de algo e "nfs-e" em qualquer parte do texto
+            r'nota\s*fiscal.*nfs[-\s]?e'
         ],
         'CNPJ Prestador': [
-            r'40\D*621\D*411\D*0001\D*53',          # permite caracteres não dígitos entre os números
-            r'sustentamais\s*consultoria'
+            # Permite quaisquer caracteres não dígitos entre os números
+            r'\b40[\D]*621[\D]*411[\D]*0001[\D]*53\b',
+            r'sustentamais\s+consultoria'
         ],
         'Valor Total': [
-            r'R\$\s*750[,.]00',                     # captura "R$ 750,00"
-            r'valor\s*(?:total|liquido)[^\d]*750[,.]00'  # captura variações envolvendo "valor total" ou "valor liquido"
+            # Procura por "R$" seguido de 750,00 com variações em espaços e pontuação
+            r'R\s*[\$]?\s*750[,.]00',
+            # Alternativa: apenas 750,00 como valor isolado
+            r'\b750[,.]00\b'
         ]
     }
     
     faltantes = []
     for campo, padroes in campos.items():
-        encontrado = any(re.search(padrao, texto, re.IGNORECASE) for padrao in padroes)
+        encontrado = any(re.search(padrao, texto, re.IGNORECASE | re.DOTALL) for padrao in padroes)
         if not encontrado:
             logger.warning(f"Campo não encontrado: {campo}")
             faltantes.append(campo)
@@ -154,7 +159,7 @@ def processar_documento(pdf_path):
 
 # ========== INTERFACE ========== #
 def main():
-    st.title("📑 Sistema de Extração de NFS-e (Versão 2.4)")
+    st.title("📑 Sistema de Extração de NFS-e (Versão 2.5)")
     
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
     
