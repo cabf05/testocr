@@ -8,163 +8,72 @@ import os
 import re
 import logging
 
-# Configurar logging
+# Configuração de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== CONFIGURAÇÃO AVANÇADA ========== #
+# Caminho para os dados do Tesseract (ajuste conforme necessário)
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
 
-# Configuração otimizada para documentos fiscais
-TESSERACT_CONFIG = r'''
-    --oem 3
-    --psm 6
-    -c preserve_interword_spaces=1
-    -l por+eng
-'''
+# Configuração do Tesseract para melhor precisão
+TESSERACT_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1 -l por+eng'
 
-# ========== FUNÇÕES DE PROCESSAMENTO ========== #
-def melhorar_qualidade_imagem(imagem):
-    """Pré-processamento profissional para documentos escaneados"""
-    try:
-        # Converter para escala de cinza
-        cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
+def preprocess_image(image):
+    """Melhora a qualidade da imagem para OCR."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+    thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 2)
+    return thresh
 
-        # Aumentar o contraste (opcional)
-        # alpha = 1.5 # Controle de contraste (1.0-3.0)
-        # beta = 0    # Controle de brilho (0-100)
-        # cinza = cv2.convertScaleAbs(cinza, alpha=alpha, beta=beta)
-        
-        # Redução de ruído adaptativo
-        denoised = cv2.fastNlMeansDenoising(cinza, h=20, templateWindowSize=9, searchWindowSize=21)
-        
-        # Realce de bordas
-        bordas = cv2.Canny(denoised, 50, 150)
-        
-        # Combinação dos resultados
-        combinado = cv2.addWeighted(denoised, 0.7, bordas, 0.3, 0)
-        
-        # Binarização adaptativa com ajustes
-        return cv2.adaptiveThreshold(combinado, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY, 51, 12)
-    except Exception as e:
-        logger.error(f"Erro no pré-processamento: {str(e)}")
-        raise
+def extract_text_from_pdf(pdf_path):
+    """Extrai texto de todas as páginas de um PDF."""
+    images = convert_from_path(pdf_path, dpi=300, poppler_path="/usr/bin")
+    text_parts = []
+    for image in images:
+        processed_image = preprocess_image(np.array(image))
+        text = pytesseract.image_to_string(processed_image, config=TESSERACT_CONFIG)
+        text_parts.append(text)
+    return "\n".join(text_parts)
 
-def corrigir_formatacao(texto):
-    """Correções inteligentes para padrões de NFS-e"""
-    correcoes = [
-        # CNPJ (tolerante a variações)
-        (r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})', r'\1.\2.\3/0001-\4'),
-        
-        # Datas (DD/MM/AAAA com separadores variados)
-        (r'(\d{1,2})[\/\\\-_ ]+(\d{1,2})[\/\\\-_ ]+(\d{4})', r'\1/\2/\3'),
-        
-        # Valores monetários (R$ 1.234,56)
-        (r'R\s*[\$\*]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?', 
-         lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}".replace(',','X').replace('.',',').replace('X','.'))
-    ]
-    
-    for padrao, substituicao in correcoes:
-        texto = re.sub(padrao, substituicao, texto, flags=re.IGNORECASE)
-    
-    return texto
-
-def validar_conteudo(texto):
-    """Validação tolerante com logging detalhado"""
-    campos = {
-        'NFS-e': [
-            r'NFS[\s\-_]?e',  # Tolerância para diferentes formatações
-            r'NOTA FISCAL DE SERVIÇOS ELETRÔNICA'
-        ],
-        'CNPJ Prestador': [
-            r'49[\D]?621[\D]?411[/]0001[\D]?93',  # CNPJ com separadores variados
-            r'SUSTENTAMAIS CONSULTORIA'
-        ],
-        'Valor Total': [
-            r'R\$\s*750[\D]?00',  # Tolerância para formatação numérica
-            r'VALOR TOTAL DA NOTA.*750'
-        ]
+def correct_text_format(text):
+    """Corrige formatos comuns de texto em NFS-e."""
+    corrections = {
+        r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})': r'\1.\2.\3/0001-\4',  # CNPJ
+        r'(\d{2})[\/.-](\d{2})[\/.-](\d{4})': r'\1/\2/\3',  # Datas
+        r'R\$ (\d+)[,.](\d{2})': r'R$\1,\2'  # Valores
     }
-    
-    faltantes = []
-    for campo, padroes in campos.items():
-        encontrado = any(re.search(padrao, texto, re.IGNORECASE) for padrao in padroes)
-        if not encontrado:
-            logger.warning(f"Campo não encontrado: {campo}")
-            faltantes.append(campo)
-    
-    if faltantes:
-        logger.error(f"Campos obrigatórios faltantes: {', '.join(faltantes)}")
-        return False, faltantes
-    
-    return True, []
+    for pattern, replacement in corrections.items():
+        text = re.sub(pattern, replacement, text)
+    return text
 
-# ========== FUNÇÃO PRINCIPAL DE EXTRAÇÃO ========== #
-def processar_documento(pdf_path):
-    try:
-        # Converter PDF para imagens com DPI aumentado
-        imagens = convert_from_path(
-            pdf_path,
-            dpi=400,
-            poppler_path="/usr/bin",
-            grayscale=True,
-            thread_count=2
-        )
-        
-        texto_completo = []
-        for idx, img in enumerate(imagens):
-            # Pré-processamento intensivo
-            img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            img_processada = melhorar_qualidade_imagem(img_cv)
-            
-            # OCR com fallback e PSM ajustado
-            try:
-                texto = pytesseract.image_to_string(img_processada, config=TESSERACT_CONFIG)
-            except:
-                texto = pytesseract.image_to_string(img_processada, config=TESSERACT_CONFIG.replace('psm 6', 'psm 11'))
-            
-            # Pós-processamento
-            texto_corrigido = corrigir_formatacao(texto)
-            texto_completo.append(texto_corrigido)
-            
-            logger.info(f"Página {idx+1} processada")
-        
-        texto_final = "\n\n".join(texto_completo)
-        valido, campos_faltantes = validar_conteudo(texto_final)
-        
-        if not valido:
-            return f"ERRO: Campos obrigatórios não encontrados ({', '.join(campos_faltantes)})"
-        
-        return texto_final
-    
-    except Exception as e:
-        logger.error(f"Erro no processamento: {str(e)}")
-        return f"ERRO: {str(e)}"
+def validate_extracted_text(text):
+    """Valida se o texto extraído contém informações chave."""
+    required_patterns = [
+        r'NOTA FISCAL DE SERVIÇOS ELETRÔNICA',
+        r'CNPJ',
+        r'Valor Total',
+        r'Data e Hora de Emissão'
+    ]
+    for pattern in required_patterns:
+        if not re.search(pattern, text, re.IGNORECASE):
+            return False
+    return True
 
-# ========== INTERFACE ========== #
 def main():
-    st.title(" Sistema de Extração de NFS-e (Versão 2.1)")
-    
-    uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
-    
+    st.title("Extração de Texto de NFS-e")
+    uploaded_file = st.file_uploader("Carregue seu arquivo PDF", type="pdf")
     if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            resultado = processar_documento(tmp_file.name)
-            
-            if resultado.startswith("ERRO"):
-                st.error(resultado)
-                with st.expander("Detalhes do Erro"):
-                    st.code(resultado)  # Mostra o texto extraído para análise
-            else:
-                st.success("✅ Documento validado com sucesso!")
-                with st.expander("Visualizar Texto Extraído"):
-                    st.text_area("Conteúdo", resultado, height=500)
-                
-                st.download_button("Baixar Texto", resultado, "nfs-e_processado.txt")
-            
-            os.unlink(tmp_file.name)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(uploaded_file.read())
+            pdf_path = temp_file.name
+        extracted_text = extract_text_from_pdf(pdf_path)
+        corrected_text = correct_text_format(extracted_text)
+        if validate_extracted_text(corrected_text):
+            st.success("Texto extraído e validado com sucesso!")
+            st.text_area("Texto extraído", corrected_text, height=300)
+        else:
+            st.error("Não foi possível validar o texto extraído. Verifique o arquivo.")
+        os.unlink(pdf_path)
 
 if __name__ == "__main__":
     main()
