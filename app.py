@@ -13,38 +13,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Caminho para os dados do Tesseract (ajuste conforme necessário)
-os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
+if "TESSDATA_PREFIX" not in os.environ:
+    os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
+    logger.info(f"TESSDATA_PREFIX não configurado via variável de ambiente, usando padrão: {os.environ['TESSDATA_PREFIX']}")
 
-# Configuração do Tesseract para melhor precisão
-TESSERACT_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1 -l por+eng'
 
-def preprocess_image(image, dpi=300, binarization_threshold=31, noise_h=10):
+def preprocess_image(image, binarization_threshold=31, denoise_strength=10):
     """Melhora a qualidade da imagem para OCR."""
     try:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        denoised = cv2.fastNlMeansDenoising(gray, h=noise_h, templateWindowSize=7, searchWindowSize=21)
+        denoised = cv2.fastNlMeansDenoising(gray, h=denoise_strength, templateWindowSize=7, searchWindowSize=21)
         thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, binarization_threshold, 2)
         return thresh
     except Exception as e:
         logger.error(f"Erro no pré-processamento da imagem: {e}")
-        st.error(f"Erro no pré-processamento da imagem: {e}")
+        st.error(f"Erro no pré-processamento da imagem: {e}. Verifique os parâmetros ou a imagem.")
         return None
 
-def extract_text_from_pdf(pdf_path, dpi=300, psm=6, oem=3, binarization_threshold=31, noise_h=10):
+def extract_text_from_pdf(pdf_path, dpi=300, psm=6, oem=3, binarization_threshold=31, denoise_strength=10, poppler_path="/usr/bin"):
     """Extrai texto de todas as páginas de um PDF."""
     try:
-        images = convert_from_path(pdf_path, dpi=dpi, poppler_path="/usr/bin")
+        images = convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
         text_parts = []
-        for image in images:
-            processed_image = preprocess_image(np.array(image), binarization_threshold=binarization_threshold, noise_h=noise_h)
+        for i, image in enumerate(images):
+            logger.info(f"Processando página {i+1}/{len(images)}")
+            processed_image = preprocess_image(np.array(image), binarization_threshold=binarization_threshold, denoise_strength=denoise_strength)
             if processed_image is not None:
                 custom_config = f'--oem {oem} --psm {psm} -c preserve_interword_spaces=1 -l por+eng'
                 text = pytesseract.image_to_string(processed_image, config=custom_config)
                 text_parts.append(text)
+            else:
+                logger.warning(f"Pré-processamento da página {i+1} falhou, pulando para a próxima página.")
         return "\n".join(text_parts)
     except Exception as e:
         logger.error(f"Erro na extração de texto do PDF: {e}")
-        st.error(f"Erro na extração de texto do PDF: {e}")
+        st.error(f"Erro na extração de texto do PDF: {e}. Verifique se o arquivo PDF é válido.")
         return ""
 
 def correct_text_format(text):
@@ -73,14 +76,21 @@ def validate_extracted_text(text):
 
 def main():
     st.title("Extração de Texto de NFS-e")
+    st.markdown("Carregue o arquivo PDF da sua NFS-e para extrair o texto.")
+
     uploaded_file = st.file_uploader("Carregue seu arquivo PDF", type="pdf")
 
-    # Opções de configuração
-    dpi = st.sidebar.slider("DPI da imagem", 200, 400, 300, 50)
-    psm = st.sidebar.slider("PSM (Page Segmentation Mode)", 3, 13, 6, 1)
-    oem = st.sidebar.slider("OEM (OCR Engine Mode)", 1, 3, 3, 1)
-    binarization_threshold = st.sidebar.slider("Limiar de binarização", 10, 50, 31, 1)
-    noise_h = st.sidebar.slider("Intensidade de remoção de ruído", 5, 20, 10, 1)
+    # Sidebar para configurações avançadas
+    with st.sidebar.expander("Configurações de Imagem", expanded=False):
+        dpi = st.slider("DPI da imagem", 200, 400, 300, 50, help="Resolução da imagem para OCR. Aumente para PDFs de baixa qualidade.")
+        binarization_threshold = st.slider("Limiar de binarização", 10, 50, 31, 1, help="Ajuste para melhorar o contraste do texto.")
+        denoise_strength = st.slider("Intensidade de remoção de ruído", 5, 20, 10, 1, help="Reduz ruídos na imagem, útil para PDFs escaneados.")
+
+    with st.sidebar.expander("Configurações de OCR", expanded=False):
+        psm = st.slider("PSM (Modo de Segmentação de Página)", 3, 13, 6, 1, help="Define como o Tesseract segmenta a página. Modo 6 é bom para blocos de texto.")
+        oem = st.slider("OEM (Modo de Motor OCR)", 1, 3, 3, 1, help="Define o motor do Tesseract. Modo 3 é o motor neural mais preciso.")
+
+    poppler_path_config = st.sidebar.text_input("Caminho Poppler (opcional)", "/usr/bin", help="Informe o caminho para o executável do Poppler se não estiver no PATH do sistema.")
 
     if uploaded_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
@@ -88,18 +98,25 @@ def main():
             pdf_path = temp_file.name
 
         with st.spinner("Extraindo texto..."):
-            extracted_text = extract_text_from_pdf(pdf_path, dpi=dpi, psm=psm, oem=oem, binarization_threshold=binarization_threshold, noise_h=noise_h)
+            extracted_text = extract_text_from_pdf(
+                pdf_path,
+                dpi=dpi,
+                psm=psm,
+                oem=oem,
+                binarization_threshold=binarization_threshold,
+                denoise_strength=denoise_strength,
+                poppler_path=poppler_path_config
+            )
             corrected_text = correct_text_format(extracted_text)
 
         if extracted_text:
             if validate_extracted_text(corrected_text):
                 st.success("Texto extraído e validado com sucesso!")
-                st.text_area("Texto extraído", corrected_text, height=300)
             else:
-                st.warning("O texto foi extraído, mas a validação falhou. Verifique o conteúdo.")
-                st.text_area("Texto extraído", corrected_text, height=300)
+                st.warning("O texto foi extraído, mas a validação falhou. Verifique o conteúdo. Pode não ser uma NFS-e ou a extração pode ter falhado parcialmente.")
+            st.text_area("Texto extraído", corrected_text, height=300)
         else:
-            st.error("Falha na extração do texto.")
+            st.error("Falha na extração do texto. Verifique o arquivo PDF e as configurações.")
 
         os.unlink(pdf_path)
 
