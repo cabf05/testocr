@@ -16,48 +16,62 @@ logger = logging.getLogger(__name__)
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
 
 # Configuração otimizada para documentos fiscais
-TESSERACT_CONFIG = r'''
-    --oem 3
-    --psm 6
-    -c preserve_interword_spaces=1
-    -l por+eng
-'''
+TESSERACT_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1 -l por+eng'
 
 # ========== FUNÇÕES DE PROCESSAMENTO ========== #
+def deskew(imagem):
+    """Corrige a inclinação da imagem binarizada."""
+    coords = np.column_stack(np.where(imagem > 0))
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    (h, w) = imagem.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(imagem, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+
 def melhorar_qualidade_imagem(imagem):
-    """Pré-processamento profissional para documentos escaneados"""
+    """Pré-processamento aprimorado para documentos escaneados."""
     try:
         # Converter para escala de cinza
         cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
         
+        # Equalização para melhorar o contraste
+        equalizada = cv2.equalizeHist(cinza)
+        
         # Redução de ruído adaptativo
-        denoised = cv2.fastNlMeansDenoising(cinza, h=20, templateWindowSize=9, searchWindowSize=21)
-        
-        # Realce de bordas
-        bordas = cv2.Canny(denoised, 50, 150)
-        
-        # Combinação dos resultados
-        combinado = cv2.addWeighted(denoised, 0.7, bordas, 0.3, 0)
+        denoised = cv2.fastNlMeansDenoising(equalizada, h=20, templateWindowSize=9, searchWindowSize=21)
         
         # Binarização adaptativa
-        return cv2.adaptiveThreshold(combinado, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY, 51, 12)
+        binarizada = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                             cv2.THRESH_BINARY, 51, 12)
+        
+        # Correção de inclinação (deskew)
+        deskewed = deskew(binarizada)
+        
+        # Operação morfológica para limpeza de pequenos ruídos
+        kernel = np.ones((1, 1), np.uint8)
+        imagem_processada = cv2.morphologyEx(deskewed, cv2.MORPH_OPEN, kernel)
+        
+        return imagem_processada
     except Exception as e:
         logger.error(f"Erro no pré-processamento: {str(e)}")
         raise
 
 def corrigir_formatacao(texto):
-    """Correções inteligentes para padrões de NFS-e"""
+    """Realiza correções inteligentes para padrões de NFS-e."""
     correcoes = [
         # CNPJ (tolerante a variações)
         (r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})', r'\1.\2.\3/0001-\4'),
-        
         # Datas (DD/MM/AAAA com separadores variados)
         (r'(\d{1,2})[\/\\\-_ ]+(\d{1,2})[\/\\\-_ ]+(\d{4})', r'\1/\2/\3'),
-        
         # Valores monetários (R$ 1.234,56)
-        (r'R\s*[\$\*]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?', 
-         lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}".replace(',','X').replace('.',',').replace('X','.'))
+        (r'R\s*[\$\*]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?',
+         lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}"
+                      .replace(',','X').replace('.',',').replace('X','.'))
     ]
     
     for padrao, substituicao in correcoes:
@@ -66,18 +80,18 @@ def corrigir_formatacao(texto):
     return texto
 
 def validar_conteudo(texto):
-    """Validação tolerante com logging detalhado"""
+    """Validação tolerante com logging detalhado dos campos obrigatórios."""
     campos = {
         'NFS-e': [
-            r'NFS[\s\-_]?e',  # Tolerância para diferentes formatações
+            r'NFS[\s\-_]?e',
             r'NOTA FISCAL DE SERVIÇOS ELETRÔNICA'
         ],
         'CNPJ Prestador': [
-            r'49[\D]?621[\D]?411[/]0001[\D]?93',  # CNPJ com separadores variados
+            r'49[\D]?621[\D]?411[/]0001[\D]?93',
             r'SUSTENTAMAIS CONSULTORIA'
         ],
         'Valor Total': [
-            r'R\$\s*750[\D]?00',  # Tolerância para formatação numérica
+            r'R\$\s*750[\D]?00',
             r'VALOR TOTAL DA NOTA.*750'
         ]
     }
@@ -95,7 +109,6 @@ def validar_conteudo(texto):
     
     return True, []
 
-# ========== FUNÇÃO PRINCIPAL DE EXTRAÇÃO ========== #
 def processar_documento(pdf_path):
     try:
         # Converter PDF para imagens
@@ -113,13 +126,15 @@ def processar_documento(pdf_path):
             img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
             img_processada = melhorar_qualidade_imagem(img_cv)
             
-            # OCR com fallback
+            # OCR com fallback para diferentes modos de segmentação
             try:
                 texto = pytesseract.image_to_string(img_processada, config=TESSERACT_CONFIG)
-            except:
-                texto = pytesseract.image_to_string(img_processada, config=TESSERACT_CONFIG.replace('psm 6', 'psm 11'))
+            except Exception as e:
+                logger.warning(f"Falha com psm 6: {str(e)}. Tentando psm 11.")
+                config_alternativo = TESSERACT_CONFIG.replace('--psm 6', '--psm 11')
+                texto = pytesseract.image_to_string(img_processada, config=config_alternativo)
             
-            # Pós-processamento
+            # Pós-processamento do texto
             texto_corrigido = corrigir_formatacao(texto)
             texto_completo.append(texto_corrigido)
             
@@ -139,27 +154,27 @@ def processar_documento(pdf_path):
 
 # ========== INTERFACE ========== #
 def main():
-    st.title("📑 Sistema de Extração de NFS-e (Versão 2.1)")
+    st.title("📑 Sistema de Extração de NFS-e (Versão 2.2)")
     
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
     
     if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             tmp_file.write(uploaded_file.read())
-            resultado = processar_documento(tmp_file.name)
-            
-            if resultado.startswith("ERRO"):
-                st.error(resultado)
-                with st.expander("Detalhes do Erro"):
-                    st.code(texto_final)  # Mostra o texto extraído para análise
-            else:
-                st.success("✅ Documento validado com sucesso!")
-                with st.expander("Visualizar Texto Extraído"):
-                    st.text_area("Conteúdo", resultado, height=500)
-                
-                st.download_button("Baixar Texto", resultado, "nfs-e_processado.txt")
-            
-            os.unlink(tmp_file.name)
+            tmp_file_path = tmp_file.name
+        
+        resultado = processar_documento(tmp_file_path)
+        
+        if resultado.startswith("ERRO"):
+            st.error(resultado)
+            st.info("Confira os logs para mais detalhes do erro.")
+        else:
+            st.success("✅ Documento validado com sucesso!")
+            with st.expander("Visualizar Texto Extraído"):
+                st.text_area("Conteúdo", resultado, height=500)
+            st.download_button("Baixar Texto", resultado, "nfs-e_processado.txt")
+        
+        os.unlink(tmp_file_path)
 
 if __name__ == "__main__":
     main()
