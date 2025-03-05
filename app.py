@@ -7,263 +7,140 @@ import tempfile
 import os
 import re
 import logging
-from typing import List, Tuple, Dict
+import unicodedata
 
 # Configurar logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações de ambiente
+# ========== CONFIGURAÇÃO AVANÇADA ========== #
 os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata/"
+TESSERACT_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1 -l por+eng'
 
-# Diretório para arquivos de debug
-DEBUG_DIR = "/tmp/nfs_ocr_debug"
-os.makedirs(DEBUG_DIR, exist_ok=True)
+# ========== FUNÇÕES DE PROCESSAMENTO ========== #
+def deskew(imagem):
+    """Corrige a inclinação da imagem binarizada."""
+    coords = np.column_stack(np.where(imagem > 0))
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    (h, w) = imagem.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(imagem, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
-def processar_imagem(imagem: np.ndarray, tecnica: str = "padrao") -> str:
-    """
-    Processar imagem com múltiplas estratégias OCR
-    
-    Args:
-        imagem (np.ndarray): Imagem de entrada
-        tecnica (str): Técnica de processamento
-    
-    Returns:
-        str: Texto extraído
-    """
-    tecnicas_processamento = {
-        "padrao": imagem,
-        "cinza": cv2.cvtColor(imagem, cv2.COLOR_RGB2GRAY),
-        "adaptativo": cv2.adaptiveThreshold(
-            cv2.cvtColor(imagem, cv2.COLOR_RGB2GRAY), 
-            255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 
-            11, 
-            2
-        )
-    }
-    
-    imagem_processada = tecnicas_processamento.get(tecnica, imagem)
-    
-    configs_ocr = [
-        {
-            "config": r'--oem 3 --psm 6 -l por+eng',
-            "nome": "Padrão"
-        },
-        {
-            "config": r'--oem 3 --psm 11 -l por+eng',
-            "nome": "Texto Livre"
-        }
-    ]
-    
-    for config in configs_ocr:
-        try:
-            texto = pytesseract.image_to_string(
-                imagem_processada, 
-                config=config['config']
-            )
-            
-            if texto.strip():
-                logger.info(f"Sucesso com técnica {tecnica} e configuração {config['nome']}")
-                return texto
-        except Exception as e:
-            logger.warning(f"Falha com técnica {tecnica} e configuração {config['nome']}: {e}")
-    
-    return ""
+def melhorar_qualidade_imagem(imagem):
+    """Pré-processamento aprimorado para documentos escaneados."""
+    try:
+        cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
+        equalizada = cv2.equalizeHist(cinza)
+        denoised = cv2.fastNlMeansDenoising(equalizada, h=20, templateWindowSize=9, searchWindowSize=21)
+        binarizada = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                             cv2.THRESH_BINARY, 51, 12)
+        deskewed = deskew(binarizada)
+        kernel = np.ones((1, 1), np.uint8)
+        return cv2.morphologyEx(deskewed, cv2.MORPH_OPEN, kernel)
+    except Exception as e:
+        logger.error(f"Erro no pré-processamento: {str(e)}")
+        raise
 
-def corrigir_formatacao(texto: str) -> str:
-    """
-    Correções inteligentes para documentos fiscais
-    
-    Args:
-        texto (str): Texto extraído
-    
-    Returns:
-        str: Texto corrigido
-    """
+def corrigir_formatacao(texto):
+    """Realiza correções inteligentes para padrões de NFS-e."""
     correcoes = [
-        # CNPJ
-        (r'(\d{2})[\.]?(\d{3})[\.]?(\d{3})[/]?0001[-]?(\d{2})', r'\1.\2.\3/0001-\4'),
-        
-        # Datas
+        (r'(\d{2})[\.]?\s*(\d{3})[\.]?\s*(\d{3})[\/]?\s*0001[-]?\s*(\d{2})', r'\1.\2.\3/0001-\4'),
         (r'(\d{1,2})[\/\\\-_ ]+(\d{1,2})[\/\\\-_ ]+(\d{4})', r'\1/\2/\3'),
-        
-        # Valores monetários
-        (r'R\s*[\$\*]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?', 
-         lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}".replace(',','X').replace('.',',').replace('X','.'))
+        (r'R\s*[\$]?\s*(\d{1,3}(?:[.,\s]\d{3})*)(?:[.,](\d{2}))?',
+         lambda m: f"R$ {float(m.group(1).replace('.','').replace(',','.')) + (float(m.group(2))/100 if m.group(2) else 0):,.2f}"
+                      .replace(',','X').replace('.',',').replace('X','.'))
     ]
-    
     for padrao, substituicao in correcoes:
         texto = re.sub(padrao, substituicao, texto, flags=re.IGNORECASE)
-    
     return texto
 
-def validar_conteudo(texto: str) -> Tuple[bool, List[str]]:
-    """
-    Validação flexível de conteúdo do documento
-    
-    Args:
-        texto (str): Texto completo
-    
-    Returns:
-        Tuple[bool, List[str]]: Validade e campos faltantes
-    """
-    campos_validacao: Dict[str, List[str]] = {
-        'NFS-e': [
-            r'NOTA\s*FISCAL\s*DE\s*SERVIÇOS\s*(ELETRÔNICA|ELETRONICA)',
-            r'NFS[\s\-_]?e',
-            r'NOTA\s*FISCAL'
-        ],
-        'CNPJ Prestador': [
-            r'40[\D]?621[\D]?411[/]0001[\D]?53',
-            r'SUSTENTAMAIS\s*CONSULTORIA',
-            r'CNPJ:?\s*40\.621\.411/0001-53'
-        ],
-        'Valor Total': [
-            r'VALOR\s*TOTAL.*R\$?\s*750[,.]?00',
-            r'TOTAL\s*DA\s*NOTA.*750',
-            r'R\$\s*750[,.]?00'
-        ]
-    }
-    
-    campos_faltantes = []
-    for campo, padroes in campos_validacao.items():
-        if not any(re.search(padrao, texto, re.IGNORECASE | re.MULTILINE) for padrao in padroes):
-            campos_faltantes.append(campo)
-            logger.warning(f"Campo não encontrado: {campo}")
-    
-    # Salvar texto completo para debug
-    with open(os.path.join(DEBUG_DIR, "texto_completo.txt"), "w", encoding="utf-8") as f:
-        f.write(texto)
-    
-    return len(campos_faltantes) == 0, campos_faltantes
+def normalizar_texto(texto):
+    """Normaliza o texto: remove acentos, converte para minúsculas e reduz espaços extras."""
+    texto = texto.lower()
+    texto = unicodedata.normalize('NFKD', texto)
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto
 
-def processar_documento(pdf_path: str) -> str:
+def validar_conteudo(texto):
     """
-    Processamento completo do documento PDF
-    
-    Args:
-        pdf_path (str): Caminho do arquivo PDF
-    
-    Returns:
-        str: Texto extraído ou mensagem de erro
+    Valida os campos obrigatórios usando o texto normalizado.
+    Em vez de regex complexos, utiliza buscas por substrings e extração de dígitos.
     """
+    norm_texto = normalizar_texto(texto)
+    
+    faltantes = []
+    
+    # Validação para NFS-e: deve conter "nota fiscal" e "nfs-e" (ou "nfs e")
+    if "nota fiscal" not in norm_texto or not ("nfs-e" in norm_texto or "nfs e" in norm_texto):
+        faltantes.append("NFS-e")
+    
+    # Validação para CNPJ Prestador:
+    # Verifica se os dígitos do CNPJ esperado ("40621411000153") estão presentes
+    # ou se a razão social "sustentamais consultoria" aparece.
+    digits = re.sub(r'\D', '', norm_texto)
+    if "40621411000153" not in digits and "sustentamais consultoria" not in norm_texto:
+        faltantes.append("CNPJ Prestador")
+    
+    # Validação para Valor Total:
+    # Procura por "75000", "r$ 750,00" ou "750,00" no texto
+    if not ("75000" in norm_texto or "r$ 750,00" in norm_texto or "750,00" in norm_texto):
+        faltantes.append("Valor Total")
+    
+    if faltantes:
+        logger.error(f"Campos obrigatórios faltantes: {', '.join(faltantes)}")
+        return False, faltantes
+    return True, []
+
+def processar_documento(pdf_path):
     try:
-        # Converter PDF com resolução aumentada
-        imagens = convert_from_path(
-            pdf_path,
-            dpi=500,  # Resolução aumentada
-            poppler_path="/usr/bin",
-            grayscale=False
-        )
-        
+        imagens = convert_from_path(pdf_path, dpi=400, poppler_path="/usr/bin",
+                                     grayscale=True, thread_count=2)
         texto_completo = []
         for idx, img in enumerate(imagens):
-            # Salvar imagem original
-            img.save(os.path.join(DEBUG_DIR, f"pagina_{idx+1}_original.png"))
-            
-            # Array numpy para processamento
-            img_array = np.array(img)
-            
-            # Tentar diferentes técnicas de processamento
-            tecnicas = ["padrao", "cinza", "adaptativo"]
-            texto_pagina = ""
-            
-            for tecnica in tecnicas:
-                texto = processar_imagem(img_array, tecnica)
-                if texto.strip():
-                    texto_pagina = texto
-                    break
-            
-            # Salvar texto extraído
-            with open(os.path.join(DEBUG_DIR, f"pagina_{idx+1}_texto.txt"), "w", encoding="utf-8") as f:
-                f.write(texto_pagina)
-            
-            # Pós-processamento
-            texto_corrigido = corrigir_formatacao(texto_pagina)
+            img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            img_processada = melhorar_qualidade_imagem(img_cv)
+            try:
+                texto = pytesseract.image_to_string(img_processada, config=TESSERACT_CONFIG)
+            except Exception as e:
+                logger.warning(f"Falha com psm 6: {str(e)}. Tentando psm 11.")
+                config_alternativo = TESSERACT_CONFIG.replace('--psm 6', '--psm 11')
+                texto = pytesseract.image_to_string(img_processada, config=config_alternativo)
+            texto_corrigido = corrigir_formatacao(texto)
             texto_completo.append(texto_corrigido)
+            logger.info(f"Página {idx+1} processada")
         
-        # Consolidar texto
         texto_final = "\n\n".join(texto_completo)
-        
-        # Validar conteúdo
         valido, campos_faltantes = validar_conteudo(texto_final)
-        
         if not valido:
             return f"ERRO: Campos obrigatórios não encontrados ({', '.join(campos_faltantes)})"
-        
         return texto_final
-    
     except Exception as e:
-        logger.error(f"Erro crítico no processamento: {str(e)}")
-        return f"ERRO CRÍTICO: {str(e)}"
+        logger.error(f"Erro no processamento: {str(e)}")
+        return f"ERRO: {str(e)}"
 
+# ========== INTERFACE ========== #
 def main():
-    """Interface principal do Streamlit"""
-    st.title("📑 Sistema de Extração de NFS-e (Versão Debug)")
-    
-    # Limpar diretório de debug
-    for arquivo in os.listdir(DEBUG_DIR):
-        os.remove(os.path.join(DEBUG_DIR, arquivo))
-    
+    st.title("📑 Sistema de Extração de NFS-e (Versão 2.6)")
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
-    
     if uploaded_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            try:
-                tmp_file.write(uploaded_file.read())
-                tmp_file.close()
-                
-                resultado = processar_documento(tmp_file.name)
-                
-                if resultado.startswith("ERRO"):
-                    st.error(resultado)
-                    
-                    # Mostrar conteúdo extraído para análise
-                    try:
-                        with open(os.path.join(DEBUG_DIR, "texto_completo.txt"), "r", encoding="utf-8") as f:
-                            texto_debug = f.read()
-                        
-                        with st.expander("Detalhes do Texto Extraído"):
-                            st.text_area("Conteúdo Extraído", texto_debug, height=300)
-                    except Exception as e:
-                        st.warning(f"Não foi possível ler arquivo de debug: {e}")
-                else:
-                    st.success("✅ Documento processado com sucesso!")
-                    
-                    with st.expander("Visualizar Texto Extraído"):
-                        st.text_area("Conteúdo", resultado, height=500)
-                    
-                    st.download_button(
-                        "Baixar Texto Extraído", 
-                        resultado, 
-                        "nfs-e_processado.txt"
-                    )
-                
-                # Mostrar arquivos de debug
-                st.divider()
-                st.subheader("🔍 Arquivos de Diagnóstico")
-                debug_files = os.listdir(DEBUG_DIR)
-                for file in debug_files:
-                    with open(os.path.join(DEBUG_DIR, file), "rb") as f:
-                        st.download_button(
-                            f"Baixar {file}", 
-                            f.read(), 
-                            file,
-                            key=file
-                        )
-            
-            except Exception as e:
-                st.error(f"Erro inesperado: {e}")
-            
-            finally:
-                # Remover arquivo temporário
-                os.unlink(tmp_file.name)
+            tmp_file.write(uploaded_file.read())
+            tmp_file_path = tmp_file.name
+        resultado = processar_documento(tmp_file_path)
+        if resultado.startswith("ERRO"):
+            st.error(resultado)
+            st.info("Confira os logs para mais detalhes do erro.")
+        else:
+            st.success("✅ Documento validado com sucesso!")
+            with st.expander("Visualizar Texto Extraído"):
+                st.text_area("Conteúdo", resultado, height=500)
+            st.download_button("Baixar Texto", resultado, "nfs-e_processado.txt")
+        os.unlink(tmp_file_path)
 
 if __name__ == "__main__":
     main()
