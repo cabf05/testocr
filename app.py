@@ -83,16 +83,16 @@ def validar_conteudo(texto):
     """Validação tolerante com logging detalhado dos campos obrigatórios."""
     campos = {
         'NFS-e': [
-            r'NFS[\s\-_]?e',
-            r'NOTA FISCAL DE SERVIÇOS ELETRÔNICA'
+            r'N\s*F\s*[-\s]*S\s*e',
+            r'NOTA\s*FISCAL\s*DE\s*SERVI[ÇC]OS'
         ],
         'CNPJ Prestador': [
-            r'49[\D]?621[\D]?411[/]0001[\D]?93',
-            r'SUSTENTAMAIS CONSULTORIA'
+            r'40[\D]?621[\D]?411[/]?0001[\D]?53',
+            r'SUSTENTAMAIS\s+CONSULTORIA'
         ],
         'Valor Total': [
-            r'R\$\s*750[\D]?00',
-            r'VALOR TOTAL DA NOTA.*750'
+            r'R\$\s*750[,.]00',
+            r'VALOR\s*TOTAL\s*DA?\s*NOTA.*750[,.]00'
         ]
     }
     
@@ -154,7 +154,7 @@ def processar_documento(pdf_path):
 
 # ========== INTERFACE ========== #
 def main():
-    st.title("📑 Sistema de Extração de NFS-e (Versão 2.2)")
+    st.title("📑 Sistema de Extração de NFS-e (Versão 2.3)")
     
     uploaded_file = st.file_uploader("Carregue o arquivo PDF", type="pdf")
     
@@ -178,3 +178,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
